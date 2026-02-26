@@ -1,0 +1,8 @@
+psycopg2-binary
+python-dotenv
+requests
+camoufox
+fastapi
+uvicorn[standard]
+openai
+python-multipart

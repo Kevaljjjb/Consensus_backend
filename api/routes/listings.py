@@ -6,106 +6,181 @@ GET /api/listings/{id}    — single listing
 GET /api/stats            — dashboard statistics
 """
 
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
 
+from api.listing_filters import (
+    build_listing_filter_conditions,
+    resolve_sort,
+    validate_min_max,
+    with_financial_numeric_fields,
+)
 from db.connection import get_db
 
 router = APIRouter(tags=["listings"])
 
 
-def _parse_money_db(val: str) -> Optional[float]:
-    """Try to parse a money string from DB to float for sorting/comparison."""
-    if not val or val == "N/A":
-        return None
-    import re
-    cleaned = re.sub(r"[^\d.]", "", str(val))
-    try:
-        return float(cleaned)
-    except (ValueError, TypeError):
-        return None
+_SELECT_COLUMNS = """
+id, url, source, title, city, state, country, industry, description,
+listed_by_firm, listed_by_name, phone, email,
+price, gross_revenue, cash_flow, inventory, ebitda,
+financial_data, source_link, extra_information, deal_date,
+first_seen_date, last_seen_date, scraping_date,
+price_num, gross_revenue_num, cash_flow_num, ebitda_num
+"""
 
 
 def _row_to_dict(row, columns) -> dict:
     """Convert a DB row tuple to a dict using column names."""
-    d = dict(zip(columns, row))
-    # Parse numeric fields for the frontend
-    for field in ("gross_revenue", "cash_flow", "ebitda", "price"):
-        if field in d:
-            d[f"{field}_numeric"] = _parse_money_db(d.get(field, ""))
-    return d
+    return with_financial_numeric_fields(dict(zip(columns, row)))
 
 
-@router.get("/listings")
+def _validate_ranges_or_422(
+    *,
+    min_cash_flow: Optional[float],
+    max_cash_flow: Optional[float],
+    min_ebitda: Optional[float],
+    max_ebitda: Optional[float],
+    min_revenue: Optional[float],
+    max_revenue: Optional[float],
+    min_price: Optional[float],
+    max_price: Optional[float],
+) -> None:
+    try:
+        validate_min_max(min_cash_flow, max_cash_flow, "cash_flow")
+        validate_min_max(min_ebitda, max_ebitda, "ebitda")
+        validate_min_max(min_revenue, max_revenue, "revenue")
+        validate_min_max(min_price, max_price, "price")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _where_clause(conditions: list[str]) -> str:
+    if not conditions:
+        return ""
+    return "WHERE " + " AND ".join(conditions)
+
+
+def _distinct_filter_values(cur, column: str) -> list[str]:
+    cur.execute(
+        f"""
+        SELECT DISTINCT {column}
+        FROM raw_listings
+        WHERE {column} IS NOT NULL
+          AND BTRIM({column}) <> ''
+          AND UPPER(BTRIM({column})) <> 'N/A'
+        ORDER BY LOWER({column}), {column}
+        """
+    )
+    return [row[0] for row in cur.fetchall()]
+
+
+class ListingsResponse(BaseModel):
+    total: int
+    page: int
+    per_page: int
+    total_pages: int
+    data: list[dict[str, Any]]
+
+
+class ListingFilterOptionsResponse(BaseModel):
+    source: list[str] = Field(default_factory=list)
+    industry: list[str] = Field(default_factory=list)
+    state: list[str] = Field(default_factory=list)
+    country: list[str] = Field(default_factory=list)
+
+
+@router.get("/listings", response_model=ListingsResponse)
 def list_listings(
     page: int = Query(1, ge=1),
-    per_page: int = Query(20, ge=1, le=100),
-    source: Optional[str] = None,
-    industry: Optional[str] = None,
-    city: Optional[str] = None,
-    state: Optional[str] = None,
-    revenue_min: Optional[float] = None,
-    revenue_max: Optional[float] = None,
-    ebitda_min: Optional[float] = None,
-    ebitda_max: Optional[float] = None,
-    sort_by: str = Query("last_seen_date", pattern="^(last_seen_date|title|price|gross_revenue|ebitda|cash_flow|first_seen_date)$"),
-    sort_order: str = Query("desc", pattern="^(asc|desc)$"),
+    per_page: int = Query(10, ge=1, le=100),
+    source: Optional[str] = Query(None, description="Exact source filter (e.g., BizBen)"),
+    industry: Optional[str] = Query(None, description="Exact industry filter"),
+    city: Optional[str] = Query(None, description="Exact city filter (legacy-compatible)"),
+    state: Optional[str] = Query(None, description="Exact state filter"),
+    country: Optional[str] = Query(None, description="Exact country filter"),
+    min_cash_flow: Optional[float] = Query(None),
+    max_cash_flow: Optional[float] = Query(None),
+    min_ebitda: Optional[float] = Query(None),
+    max_ebitda: Optional[float] = Query(None),
+    min_revenue: Optional[float] = Query(None),
+    max_revenue: Optional[float] = Query(None),
+    min_price: Optional[float] = Query(None),
+    max_price: Optional[float] = Query(None),
+    # Legacy aliases maintained for older clients.
+    revenue_min: Optional[float] = Query(None, include_in_schema=False),
+    revenue_max: Optional[float] = Query(None, include_in_schema=False),
+    ebitda_min: Optional[float] = Query(None, include_in_schema=False),
+    ebitda_max: Optional[float] = Query(None, include_in_schema=False),
+    sort_by: str = Query(
+        "last_seen_date",
+        description=(
+            "Allowed: last_seen_date, first_seen_date, gross_revenue_num, "
+            "ebitda_num, cash_flow_num, price_num"
+        ),
+    ),
+    sort_order: str = Query("desc", description="Allowed: asc, desc"),
 ):
-    """Paginated listing of deals with optional filters."""
+    """Paginated listing of deals with optional source/location/financial filters."""
+    effective_min_revenue = min_revenue if min_revenue is not None else revenue_min
+    effective_max_revenue = max_revenue if max_revenue is not None else revenue_max
+    effective_min_ebitda = min_ebitda if min_ebitda is not None else ebitda_min
+    effective_max_ebitda = max_ebitda if max_ebitda is not None else ebitda_max
+
+    _validate_ranges_or_422(
+        min_cash_flow=min_cash_flow,
+        max_cash_flow=max_cash_flow,
+        min_ebitda=effective_min_ebitda,
+        max_ebitda=effective_max_ebitda,
+        min_revenue=effective_min_revenue,
+        max_revenue=effective_max_revenue,
+        min_price=min_price,
+        max_price=max_price,
+    )
+
+    try:
+        sort_column, sql_sort_order = resolve_sort(sort_by=sort_by, sort_order=sort_order)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    conditions, params = build_listing_filter_conditions(
+        source=source,
+        industry=industry,
+        city=city,
+        state=state,
+        country=country,
+        min_cash_flow=min_cash_flow,
+        max_cash_flow=max_cash_flow,
+        min_ebitda=effective_min_ebitda,
+        max_ebitda=effective_max_ebitda,
+        min_revenue=effective_min_revenue,
+        max_revenue=effective_max_revenue,
+        min_price=min_price,
+        max_price=max_price,
+    )
+    where_sql = _where_clause(conditions)
+
     with get_db() as conn:
         cur = conn.cursor()
 
-        conditions = []
-        params = []
-
-        if source:
-            conditions.append("source = %s")
-            params.append(source)
-        if industry:
-            conditions.append("industry ILIKE %s")
-            params.append(f"%{industry}%")
-        if city:
-            conditions.append("city ILIKE %s")
-            params.append(f"%{city}%")
-        if state:
-            conditions.append("state ILIKE %s")
-            params.append(f"%{state}%")
-
-        where = ""
-        if conditions:
-            where = "WHERE " + " AND ".join(conditions)
-
         # Count total
-        cur.execute(f"SELECT COUNT(*) FROM raw_listings {where}", params)
+        cur.execute(f"SELECT COUNT(*) FROM raw_listings {where_sql}", params)
         total = cur.fetchone()[0]
 
         # Fetch page
         offset = (page - 1) * per_page
         sql = f"""
-            SELECT id, url, source, title, city, state, country, industry, description,
-                   listed_by_firm, listed_by_name, phone, email,
-                   price, gross_revenue, cash_flow, inventory, ebitda,
-                   financial_data, source_link, extra_information, deal_date,
-                   first_seen_date, last_seen_date, scraping_date
+            SELECT {_SELECT_COLUMNS}
             FROM raw_listings
-            {where}
-            ORDER BY {sort_by} {sort_order}
+            {where_sql}
+            ORDER BY {sort_column} {sql_sort_order} NULLS LAST, id DESC
             LIMIT %s OFFSET %s
         """
         cur.execute(sql, params + [per_page, offset])
         columns = [desc[0] for desc in cur.description]
         rows = [_row_to_dict(r, columns) for r in cur.fetchall()]
-
-        # Apply in-memory revenue/ebitda range filters if specified
-        if revenue_min is not None:
-            rows = [r for r in rows if (r.get("gross_revenue_numeric") or 0) >= revenue_min]
-        if revenue_max is not None:
-            rows = [r for r in rows if (r.get("gross_revenue_numeric") or 0) <= revenue_max]
-        if ebitda_min is not None:
-            rows = [r for r in rows if (r.get("ebitda_numeric") or 0) >= ebitda_min]
-        if ebitda_max is not None:
-            rows = [r for r in rows if (r.get("ebitda_numeric") or 0) <= ebitda_max]
 
         cur.close()
 
@@ -118,6 +193,21 @@ def list_listings(
     }
 
 
+@router.get("/listings/filter-options", response_model=ListingFilterOptionsResponse)
+def get_listing_filter_options():
+    """Return distinct, non-empty filter option values for the listings UI."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        response = {
+            "source": _distinct_filter_values(cur, "source"),
+            "industry": _distinct_filter_values(cur, "industry"),
+            "state": _distinct_filter_values(cur, "state"),
+            "country": _distinct_filter_values(cur, "country"),
+        }
+        cur.close()
+    return response
+
+
 @router.get("/listings/{listing_id}")
 def get_listing(listing_id: int):
     """Get a single listing by ID."""
@@ -125,11 +215,13 @@ def get_listing(listing_id: int):
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT id, url, source, title, city, state, country, industry, description,
-                   listed_by_firm, listed_by_name, phone, email,
-                   price, gross_revenue, cash_flow, inventory, ebitda,
-                   financial_data, source_link, extra_information, deal_date,
-                   first_seen_date, last_seen_date, scraping_date
+            SELECT
+                id, url, source, title, city, state, country, industry, description,
+                listed_by_firm, listed_by_name, phone, email,
+                price, gross_revenue, cash_flow, inventory, ebitda,
+                financial_data, source_link, extra_information, deal_date,
+                first_seen_date, last_seen_date, scraping_date,
+                price_num, gross_revenue_num, cash_flow_num, ebitda_num
             FROM raw_listings WHERE id = %s
             """,
             (listing_id,),

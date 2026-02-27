@@ -6,3 +6,4 @@ fastapi
 uvicorn[standard]
 openai
 python-multipart
+pytest

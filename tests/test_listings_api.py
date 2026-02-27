@@ -24,6 +24,11 @@ class FakeListingsCursor:
         bound_params = list(params or [])
         self.executions.append((query, bound_params))
 
+        if "information_schema.columns" in query:
+            self._fetchone = (4,)
+            self._fetchall = []
+            return
+
         if "COUNT(*)" in query:
             self._fetchone = (21,)
             return
@@ -119,7 +124,7 @@ def test_listings_filter_combination_and_pagination(monkeypatch):
     assert body["total_pages"] == 3
     assert body["data"][0]["cash_flow_numeric"] == 300000.0
 
-    count_query, count_params = cursor.executions[0]
+    count_query, count_params = cursor.executions[1]
     assert "source = %s" in count_query
     assert "industry = %s" in count_query
     assert "cash_flow_num >= %s" in count_query
@@ -127,7 +132,7 @@ def test_listings_filter_combination_and_pagination(monkeypatch):
     assert "gross_revenue_num >= %s" in count_query
     assert count_params[:4] == ["BizBen", "Services", "CA", "US"]
 
-    page_query, page_params = cursor.executions[1]
+    page_query, page_params = cursor.executions[2]
     assert "ORDER BY cash_flow_num ASC NULLS LAST, id DESC" in page_query
     assert page_params[-2:] == [10, 10]
 

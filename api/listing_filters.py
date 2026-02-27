@@ -10,6 +10,7 @@ from typing import Any, Optional
 
 _TEXT_SENTINELS = {"", "N/A", "NA", "NULL", "NONE", "-", "--"}
 _NUMERIC_PATTERN = re.compile(r"^[+-]?\d+(?:\.\d+)?$")
+_NUMERIC_COLUMNS_CACHE: Optional[bool] = None
 
 SORT_COLUMN_MAP = {
     "last_seen_date": "last_seen_date",
@@ -26,6 +27,13 @@ LEGACY_SORT_ALIASES = {
     "ebitda": "ebitda_num",
     "cash_flow": "cash_flow_num",
     "price": "price_num",
+}
+
+NUMERIC_TEXT_COLUMN_MAP = {
+    "price_num": "price",
+    "gross_revenue_num": "gross_revenue",
+    "cash_flow_num": "cash_flow",
+    "ebitda_num": "ebitda",
 }
 
 
@@ -100,6 +108,76 @@ def validate_min_max(min_value: Optional[float], max_value: Optional[float], lab
         raise ValueError(f"Invalid range for {label}: min_{label} cannot be greater than max_{label}.")
 
 
+def reset_numeric_columns_cache() -> None:
+    """Test helper: clear cached numeric-column availability."""
+    global _NUMERIC_COLUMNS_CACHE
+    _NUMERIC_COLUMNS_CACHE = None
+
+
+def detect_numeric_columns(cur) -> bool:
+    """
+    Detect whether raw_listings has normalized numeric columns.
+
+    Result is cached per worker process.
+    """
+    global _NUMERIC_COLUMNS_CACHE
+    if _NUMERIC_COLUMNS_CACHE is not None:
+        return _NUMERIC_COLUMNS_CACHE
+
+    required_columns = list(NUMERIC_TEXT_COLUMN_MAP.keys())
+    cur.execute(
+        """
+        SELECT COUNT(*)
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'raw_listings'
+          AND column_name = ANY(%s)
+        """,
+        (required_columns,),
+    )
+    _NUMERIC_COLUMNS_CACHE = cur.fetchone()[0] == len(required_columns)
+    return _NUMERIC_COLUMNS_CACHE
+
+
+def _financial_numeric_sql_expr(column_name: str, table_alias: Optional[str] = None) -> str:
+    """Safe SQL expression to parse text financial values to NUMERIC."""
+    prefix = f"{table_alias}." if table_alias else ""
+    col = f"{prefix}{column_name}"
+    transformed = (
+        "regexp_replace("
+        f"CASE WHEN BTRIM({col}) ~ '^\\(.*\\)$' "
+        f"THEN '-' || SUBSTRING(BTRIM({col}) FROM 2 FOR CHAR_LENGTH(BTRIM({col})) - 2) "
+        f"ELSE BTRIM({col}) END, '[,$ ]', '', 'g'"
+        ")"
+    )
+    return (
+        "("
+        "CASE "
+        f"WHEN {col} IS NULL THEN NULL "
+        f"WHEN BTRIM({col}) = '' OR UPPER(BTRIM({col})) IN ('N/A', 'NA', 'NULL', 'NONE', '-', '--') THEN NULL "
+        f"WHEN {transformed} ~ '^[+-]?\\d+(\\.\\d+)?$' THEN ({transformed})::NUMERIC "
+        "ELSE NULL "
+        "END"
+        ")"
+    )
+
+
+def numeric_select_columns_sql(*, numeric_columns_available: bool, table_alias: Optional[str] = None) -> str:
+    """
+    SQL list for numeric select columns.
+
+    If numeric columns don't exist yet, emits parsed text expressions with aliases.
+    """
+    prefix = f"{table_alias}." if table_alias else ""
+    parts: list[str] = []
+    for numeric_col, text_col in NUMERIC_TEXT_COLUMN_MAP.items():
+        if numeric_columns_available:
+            parts.append(f"{prefix}{numeric_col}")
+        else:
+            parts.append(f"{_financial_numeric_sql_expr(text_col, table_alias)} AS {numeric_col}")
+    return ", ".join(parts)
+
+
 def build_listing_filter_conditions(
     *,
     source: Optional[str] = None,
@@ -115,6 +193,7 @@ def build_listing_filter_conditions(
     max_revenue: Optional[float] = None,
     min_price: Optional[float] = None,
     max_price: Optional[float] = None,
+    numeric_columns_available: bool = True,
     table_alias: Optional[str] = None,
 ) -> tuple[list[str], list[Any]]:
     """Build SQL conditions and bind params for listing/search filters."""
@@ -140,12 +219,18 @@ def build_listing_filter_conditions(
         ("gross_revenue_num", min_revenue, max_revenue),
         ("price_num", min_price, max_price),
     )
-    for column, min_value, max_value in numeric_filters:
+    for numeric_col, min_value, max_value in numeric_filters:
+        text_col = NUMERIC_TEXT_COLUMN_MAP[numeric_col]
+        if numeric_columns_available:
+            filter_target = f"{prefix}{numeric_col}"
+        else:
+            filter_target = _financial_numeric_sql_expr(text_col, table_alias)
+
         if min_value is not None:
-            conditions.append(f"{prefix}{column} >= %s")
+            conditions.append(f"{filter_target} >= %s")
             params.append(min_value)
         if max_value is not None:
-            conditions.append(f"{prefix}{column} <= %s")
+            conditions.append(f"{filter_target} <= %s")
             params.append(max_value)
 
     return conditions, params

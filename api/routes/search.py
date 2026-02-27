@@ -11,7 +11,13 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException, Query as FastAPIQuery
 from pydantic import BaseModel
 
-from api.listing_filters import build_listing_filter_conditions, validate_min_max, with_financial_numeric_fields
+from api.listing_filters import (
+    build_listing_filter_conditions,
+    detect_numeric_columns,
+    numeric_select_columns_sql,
+    validate_min_max,
+    with_financial_numeric_fields,
+)
 from db.connection import get_db
 from embeddings import get_embedding, rerank_documents
 
@@ -25,13 +31,12 @@ _RERANK_HARD_MAX = max(1, int(os.environ.get("SEARCH_RERANK_HARD_MAX", "40")))
 _RERANK_MAX_CHARS = max(200, int(os.environ.get("SEARCH_RERANK_MAX_CHARS", "1200")))
 
 
-_SELECT_COLUMNS = """
+_BASE_SELECT_COLUMNS = """
 id, url, source, title, city, state, country, industry, description,
 listed_by_firm, listed_by_name, phone, email,
 price, gross_revenue, cash_flow, inventory, ebitda,
 financial_data, source_link, extra_information, deal_date,
-first_seen_date, last_seen_date, scraping_date,
-price_num, gross_revenue_num, cash_flow_num, ebitda_num
+first_seen_date, last_seen_date, scraping_date
 """
 
 
@@ -54,6 +59,7 @@ def _text_search(
     limit: int,
     filter_conditions: list[str],
     filter_params: list[Any],
+    select_columns_sql: str,
 ) -> list[dict]:
     pattern = f"%{q}%"
     conditions = [
@@ -70,7 +76,7 @@ def _text_search(
 
     cur.execute(
         f"""
-        SELECT {_SELECT_COLUMNS}
+        SELECT {select_columns_sql}
         FROM raw_listings
         {where_sql}
         LIMIT %s
@@ -86,13 +92,14 @@ def _semantic_candidates(
     fetch_limit: int,
     filter_conditions: list[str],
     filter_params: list[Any],
+    select_columns_sql: str,
 ) -> list[dict]:
     where_conditions = ["description_embedding IS NOT NULL", *filter_conditions]
     where_sql = "WHERE " + " AND ".join(where_conditions)
 
     cur.execute(
         f"""
-        SELECT {_SELECT_COLUMNS},
+        SELECT {select_columns_sql},
                (description_embedding <=> %s::vector) AS distance
         FROM raw_listings
         {where_sql}
@@ -178,25 +185,38 @@ def semantic_search(
         max_price=max_price,
     )
 
-    filter_conditions, filter_params = build_listing_filter_conditions(
-        source=source,
-        industry=industry,
-        state=state,
-        country=country,
-        min_cash_flow=min_cash_flow,
-        max_cash_flow=max_cash_flow,
-        min_ebitda=effective_min_ebitda,
-        max_ebitda=effective_max_ebitda,
-        min_revenue=effective_min_revenue,
-        max_revenue=effective_max_revenue,
-        min_price=min_price,
-        max_price=max_price,
-    )
-
     with get_db() as conn:
         with conn.cursor() as cur:
+            numeric_columns_available = detect_numeric_columns(cur)
+            select_columns_sql = (
+                f"{_BASE_SELECT_COLUMNS}, "
+                f"{numeric_select_columns_sql(numeric_columns_available=numeric_columns_available)}"
+            )
+            filter_conditions, filter_params = build_listing_filter_conditions(
+                source=source,
+                industry=industry,
+                state=state,
+                country=country,
+                min_cash_flow=min_cash_flow,
+                max_cash_flow=max_cash_flow,
+                min_ebitda=effective_min_ebitda,
+                max_ebitda=effective_max_ebitda,
+                min_revenue=effective_min_revenue,
+                max_revenue=effective_max_revenue,
+                min_price=min_price,
+                max_price=max_price,
+                numeric_columns_available=numeric_columns_available,
+            )
+
             if len(words) < 3:
-                results = _text_search(cur, q, limit, filter_conditions, filter_params)
+                results = _text_search(
+                    cur,
+                    q,
+                    limit,
+                    filter_conditions,
+                    filter_params,
+                    select_columns_sql,
+                )
                 return {
                     "query": q,
                     "method": "text",
@@ -209,7 +229,14 @@ def semantic_search(
                 query_embedding = get_embedding(q)
             except Exception:
                 # Fallback to text search on embedding failure.
-                results = _text_search(cur, q, limit, filter_conditions, filter_params)
+                results = _text_search(
+                    cur,
+                    q,
+                    limit,
+                    filter_conditions,
+                    filter_params,
+                    select_columns_sql,
+                )
                 return {
                     "query": q,
                     "method": "text (embedding fallback)",
@@ -238,6 +265,7 @@ def semantic_search(
                 fetch_limit,
                 filter_conditions,
                 filter_params,
+                select_columns_sql,
             )
 
     # Reranking step

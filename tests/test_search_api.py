@@ -17,11 +17,18 @@ class FakeSearchCursor:
     def __init__(self):
         self.executions: list[tuple[str, list]] = []
         self.description = []
+        self._fetchone = None
         self._fetchall = []
 
     def execute(self, query, params=None):
         bound_params = list(params or [])
         self.executions.append((query, bound_params))
+
+        if "information_schema.columns" in query:
+            self._fetchone = (4,)
+            self._fetchall = []
+            return
+
         self.description = [(name,) for name in [
             "id", "url", "source", "title", "city", "state", "country", "industry", "description",
             "listed_by_firm", "listed_by_name", "phone", "email",
@@ -38,6 +45,9 @@ class FakeSearchCursor:
             "2026-01-01T00:00:00Z", "2026-02-25T00:00:00Z", "2026-02-25",
             Decimal("400000"), Decimal("1100000"), Decimal("220000"), Decimal("190000"),
         )]
+
+    def fetchone(self):
+        return self._fetchone
 
     def fetchall(self):
         return self._fetchall
@@ -94,7 +104,7 @@ def test_search_text_path_applies_filters_in_sql(monkeypatch):
     assert body["total"] == 1
     assert body["data"][0]["price_numeric"] == 400000.0
 
-    sql, params = cursor.executions[0]
+    sql, params = cursor.executions[1]
     assert "source = %s" in sql
     assert "industry = %s" in sql
     assert "price_num >= %s" in sql

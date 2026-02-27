@@ -4,6 +4,7 @@ import pytest
 
 from api.listing_filters import (
     build_listing_filter_conditions,
+    numeric_select_columns_sql,
     parse_financial_value,
     resolve_sort,
     validate_min_max,
@@ -92,3 +93,22 @@ def test_with_financial_numeric_fields_prefers_numeric_columns():
     assert output["gross_revenue_numeric"] == 1_000_000.0
     assert output["cash_flow_numeric"] is None
     assert output["ebitda_numeric"] == 260_000.0
+
+
+def test_build_listing_filter_conditions_fallback_expression_without_numeric_columns():
+    conditions, params = build_listing_filter_conditions(
+        min_revenue=500_000,
+        max_price=2_000_000,
+        numeric_columns_available=False,
+    )
+    assert len(conditions) == 2
+    assert "gross_revenue_num" not in conditions[0]
+    assert "price_num" not in conditions[1]
+    assert "regexp_replace" in conditions[0]
+    assert params == [500_000, 2_000_000]
+
+
+def test_numeric_select_columns_sql_fallback_has_aliases():
+    select_sql = numeric_select_columns_sql(numeric_columns_available=False)
+    assert "AS price_num" in select_sql
+    assert "AS gross_revenue_num" in select_sql

@@ -13,6 +13,8 @@ from pydantic import BaseModel, Field
 
 from api.listing_filters import (
     build_listing_filter_conditions,
+    detect_numeric_columns,
+    numeric_select_columns_sql,
     resolve_sort,
     validate_min_max,
     with_financial_numeric_fields,
@@ -22,13 +24,12 @@ from db.connection import get_db
 router = APIRouter(tags=["listings"])
 
 
-_SELECT_COLUMNS = """
+_BASE_SELECT_COLUMNS = """
 id, url, source, title, city, state, country, industry, description,
 listed_by_firm, listed_by_name, phone, email,
 price, gross_revenue, cash_flow, inventory, ebitda,
 financial_data, source_link, extra_information, deal_date,
-first_seen_date, last_seen_date, scraping_date,
-price_num, gross_revenue_num, cash_flow_num, ebitda_num
+first_seen_date, last_seen_date, scraping_date
 """
 
 
@@ -145,25 +146,31 @@ def list_listings(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    conditions, params = build_listing_filter_conditions(
-        source=source,
-        industry=industry,
-        city=city,
-        state=state,
-        country=country,
-        min_cash_flow=min_cash_flow,
-        max_cash_flow=max_cash_flow,
-        min_ebitda=effective_min_ebitda,
-        max_ebitda=effective_max_ebitda,
-        min_revenue=effective_min_revenue,
-        max_revenue=effective_max_revenue,
-        min_price=min_price,
-        max_price=max_price,
-    )
-    where_sql = _where_clause(conditions)
-
     with get_db() as conn:
         cur = conn.cursor()
+        numeric_columns_available = detect_numeric_columns(cur)
+
+        conditions, params = build_listing_filter_conditions(
+            source=source,
+            industry=industry,
+            city=city,
+            state=state,
+            country=country,
+            min_cash_flow=min_cash_flow,
+            max_cash_flow=max_cash_flow,
+            min_ebitda=effective_min_ebitda,
+            max_ebitda=effective_max_ebitda,
+            min_revenue=effective_min_revenue,
+            max_revenue=effective_max_revenue,
+            min_price=min_price,
+            max_price=max_price,
+            numeric_columns_available=numeric_columns_available,
+        )
+        where_sql = _where_clause(conditions)
+        select_columns = (
+            f"{_BASE_SELECT_COLUMNS}, "
+            f"{numeric_select_columns_sql(numeric_columns_available=numeric_columns_available)}"
+        )
 
         # Count total
         cur.execute(f"SELECT COUNT(*) FROM raw_listings {where_sql}", params)
@@ -172,7 +179,7 @@ def list_listings(
         # Fetch page
         offset = (page - 1) * per_page
         sql = f"""
-            SELECT {_SELECT_COLUMNS}
+            SELECT {select_columns}
             FROM raw_listings
             {where_sql}
             ORDER BY {sort_column} {sql_sort_order} NULLS LAST, id DESC
@@ -213,17 +220,13 @@ def get_listing(listing_id: int):
     """Get a single listing by ID."""
     with get_db() as conn:
         cur = conn.cursor()
+        numeric_columns_available = detect_numeric_columns(cur)
+        select_columns = (
+            f"{_BASE_SELECT_COLUMNS}, "
+            f"{numeric_select_columns_sql(numeric_columns_available=numeric_columns_available)}"
+        )
         cur.execute(
-            """
-            SELECT
-                id, url, source, title, city, state, country, industry, description,
-                listed_by_firm, listed_by_name, phone, email,
-                price, gross_revenue, cash_flow, inventory, ebitda,
-                financial_data, source_link, extra_information, deal_date,
-                first_seen_date, last_seen_date, scraping_date,
-                price_num, gross_revenue_num, cash_flow_num, ebitda_num
-            FROM raw_listings WHERE id = %s
-            """,
+            f"SELECT {select_columns} FROM raw_listings WHERE id = %s",
             (listing_id,),
         )
         row = cur.fetchone()

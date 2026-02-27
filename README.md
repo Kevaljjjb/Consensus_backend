@@ -37,8 +37,31 @@ curl "http://localhost:8000/api/search?q=hvac%20business&limit=20&source=BizBuyS
 curl "http://localhost:8000/api/listings/filter-options"
 ```
 
+## Dashboard Overview API
+
+`GET /api/dashboard/overview` returns a single aggregated payload for KPI cards, funnel, source yield, ranked priority queue, SLA, and data quality.
+
+### Query params
+- `lookback_days` (default `90`)
+- `priority_limit` (default `12`, max `50`)
+- `country_scope` (default `US,CA`)
+
+### Example
+
+```bash
+curl "http://localhost:8000/api/dashboard/overview?lookback_days=90&priority_limit=12&country_scope=US,CA"
+```
+
+Notes:
+- SLA values are returned as `null` until a compatible `pipeline` table exists.
+- Response is cached server-side for 5 minutes per query-param combination.
+
 ## Migration
 
 Apply the migration script before using numeric range filters/sorts:
 
 `db/migrations/20260227_add_listing_filter_columns.sql`
+
+For dashboard read-path optimization and numeric backfill safety, also apply:
+
+`db/migrations/20260227_dashboard_overview_optimizations.sql`

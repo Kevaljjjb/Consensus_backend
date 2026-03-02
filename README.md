@@ -56,6 +56,63 @@ Notes:
 - SLA values are returned as `null` until a compatible `pipeline` table exists.
 - Response is cached server-side for 5 minutes per query-param combination.
 
+## Chatbot API (RAG)
+
+`POST /api/chat` — AI-powered chatbot that answers questions about scraped business listings using Retrieval-Augmented Generation.
+
+The endpoint embeds the user's question, retrieves the most relevant listings via pgvector, and sends them as context to OpenAI GPT to generate a grounded answer.
+
+### Request body
+
+```json
+{
+  "session_id": "optional-uuid",
+  "message": "What HVAC businesses are available in California?"
+}
+```
+
+### Response
+
+```json
+{
+  "session_id": "uuid",
+  "reply": "Based on the listings, there are several HVAC businesses...",
+  "sources": [
+    { "id": 42, "title": "HVAC Company – Los Angeles", "url": "https://..." }
+  ]
+}
+```
+
+- If `session_id` is omitted, a new session is created automatically.
+- Pass the returned `session_id` in follow-up messages to maintain conversation history.
+- Sessions expire after 1 hour of inactivity.
+
+### Configuration (`.env`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OPENAI_API_KEY` | *required* | OpenAI API key for chat completions |
+| `CHAT_MODEL` | `gpt-5-mini` | OpenAI model to use |
+| `CHAT_CONTEXT_TOP_K` | `10` | Number of listings retrieved as context |
+| `CHAT_MAX_HISTORY_TURNS` | `20` | Max conversation turns kept per session |
+| `CHAT_SESSION_TTL_SECONDS` | `3600` | Session expiry time (seconds) |
+
+### Examples
+
+```bash
+# Start a new chat
+curl -X POST "http://localhost:8000/api/chat" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What manufacturing businesses are available?"}'
+```
+
+```bash
+# Continue a conversation
+curl -X POST "http://localhost:8000/api/chat" \
+  -H "Content-Type: application/json" \
+  -d '{"session_id": "your-session-id", "message": "Tell me more about the first one"}'
+```
+
 ## Migration
 
 Apply the migration script before using numeric range filters/sorts:

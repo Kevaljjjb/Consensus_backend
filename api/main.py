@@ -22,6 +22,7 @@ from api.routes.listings import router as listings_router
 from api.routes.dashboard import router as dashboard_router
 from api.routes.search import router as search_router
 from api.routes.upload import router as upload_router
+from api.routes.chat import router as chat_router
 
 
 @asynccontextmanager
@@ -64,6 +65,7 @@ app.include_router(listings_router, prefix="/api")
 app.include_router(dashboard_router, prefix="/api")
 app.include_router(search_router, prefix="/api")
 app.include_router(upload_router, prefix="/api")
+app.include_router(chat_router, prefix="/api")
 
 
 @app.get("/api/health")

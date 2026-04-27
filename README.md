@@ -1,4 +1,4 @@
-<![CDATA[# Consensus — Backend
+# Consensus — Backend
 
 > FastAPI server powering the AI-driven business acquisition intelligence platform.
 
@@ -302,4 +302,4 @@ Tests cover listings, dashboard, search, chat, deal scoring, and evaluation APIs
 | `EMBEDDING_MODEL` | ✅ | Embedding model name |
 | `EMBEDDING_DIMENSIONS` | ✅ | Embedding vector dimensions |
 | `API_KEY` | ➖ | OpenAI API key (optional, for select features) |
-]]>
+

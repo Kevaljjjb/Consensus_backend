@@ -65,3 +65,5 @@ Apply the migration script before using numeric range filters/sorts:
 For dashboard read-path optimization and numeric backfill safety, also apply:
 
 `db/migrations/20260227_dashboard_overview_optimizations.sql`
+cd backend
+python3 -m uvicorn api.main:app --reload

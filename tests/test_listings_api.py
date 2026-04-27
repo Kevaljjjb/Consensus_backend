@@ -55,7 +55,7 @@ class FakeListingsCursor:
             "price", "gross_revenue", "cash_flow", "inventory", "ebitda",
             "financial_data", "source_link", "extra_information", "deal_date",
             "first_seen_date", "last_seen_date", "scraping_date",
-            "price_num", "gross_revenue_num", "cash_flow_num", "ebitda_num",
+            "price_num", "gross_revenue_num", "cash_flow_num", "ebitda_num", "ai_fit_score",
         ]]
         self._fetchall = [(
             1, "https://example.com/1", "BizBen", "HVAC Business", "Los Angeles", "CA", "US", "Services", "Nice deal",
@@ -63,7 +63,7 @@ class FakeListingsCursor:
             "$900,000", "$1,500,000", "$300,000", "N/A", "$250,000",
             "N/A", "source", "N/A", "N/A",
             "2026-02-01T00:00:00Z", "2026-02-20T00:00:00Z", "2026-02-20",
-            Decimal("900000"), Decimal("1500000"), Decimal("300000"), Decimal("250000"),
+            Decimal("900000"), Decimal("1500000"), Decimal("300000"), Decimal("250000"), 73,
         )]
 
     def fetchone(self):
@@ -123,6 +123,7 @@ def test_listings_filter_combination_and_pagination(monkeypatch):
     assert body["per_page"] == 10
     assert body["total_pages"] == 3
     assert body["data"][0]["cash_flow_numeric"] == 300000.0
+    assert body["data"][0]["ai_fit_score"] == 73
 
     count_query, count_params = cursor.executions[1]
     assert "source = %s" in count_query
@@ -133,7 +134,8 @@ def test_listings_filter_combination_and_pagination(monkeypatch):
     assert count_params[:4] == ["BizBen", "Services", "CA", "US"]
 
     page_query, page_params = cursor.executions[2]
-    assert "ORDER BY cash_flow_num ASC NULLS LAST, id DESC" in page_query
+    assert "LEFT JOIN deal_evaluations ON deal_evaluations.listing_id = raw_listings.id" in page_query
+    assert "ORDER BY cash_flow_num ASC NULLS LAST, raw_listings.id DESC" in page_query
     assert page_params[-2:] == [10, 10]
 
 

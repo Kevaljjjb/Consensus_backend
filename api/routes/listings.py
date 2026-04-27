@@ -25,12 +25,34 @@ router = APIRouter(tags=["listings"])
 
 
 _BASE_SELECT_COLUMNS = """
-id, url, source, title, city, state, country, industry, description,
-listed_by_firm, listed_by_name, phone, email,
-price, gross_revenue, cash_flow, inventory, ebitda,
-financial_data, source_link, extra_information, deal_date,
-first_seen_date, last_seen_date, scraping_date
+raw_listings.id AS id,
+raw_listings.url AS url,
+raw_listings.source AS source,
+raw_listings.title AS title,
+raw_listings.city AS city,
+raw_listings.state AS state,
+raw_listings.country AS country,
+raw_listings.industry AS industry,
+raw_listings.description AS description,
+raw_listings.listed_by_firm AS listed_by_firm,
+raw_listings.listed_by_name AS listed_by_name,
+raw_listings.phone AS phone,
+raw_listings.email AS email,
+raw_listings.price AS price,
+raw_listings.gross_revenue AS gross_revenue,
+raw_listings.cash_flow AS cash_flow,
+raw_listings.inventory AS inventory,
+raw_listings.ebitda AS ebitda,
+raw_listings.financial_data AS financial_data,
+raw_listings.source_link AS source_link,
+raw_listings.extra_information AS extra_information,
+raw_listings.deal_date AS deal_date,
+raw_listings.first_seen_date AS first_seen_date,
+raw_listings.last_seen_date AS last_seen_date,
+raw_listings.scraping_date AS scraping_date
 """
+
+_AI_FIT_SCORE_SELECT = "deal_evaluations.fit_score AS ai_fit_score"
 
 
 def _row_to_dict(row, columns) -> dict:
@@ -169,7 +191,8 @@ def list_listings(
         where_sql = _where_clause(conditions)
         select_columns = (
             f"{_BASE_SELECT_COLUMNS}, "
-            f"{numeric_select_columns_sql(numeric_columns_available=numeric_columns_available)}"
+            f"{numeric_select_columns_sql(numeric_columns_available=numeric_columns_available)}, "
+            f"{_AI_FIT_SCORE_SELECT}"
         )
 
         # Count total
@@ -181,8 +204,9 @@ def list_listings(
         sql = f"""
             SELECT {select_columns}
             FROM raw_listings
+            LEFT JOIN deal_evaluations ON deal_evaluations.listing_id = raw_listings.id
             {where_sql}
-            ORDER BY {sort_column} {sql_sort_order} NULLS LAST, id DESC
+            ORDER BY {sort_column} {sql_sort_order} NULLS LAST, raw_listings.id DESC
             LIMIT %s OFFSET %s
         """
         cur.execute(sql, params + [per_page, offset])
@@ -223,10 +247,16 @@ def get_listing(listing_id: int):
         numeric_columns_available = detect_numeric_columns(cur)
         select_columns = (
             f"{_BASE_SELECT_COLUMNS}, "
-            f"{numeric_select_columns_sql(numeric_columns_available=numeric_columns_available)}"
+            f"{numeric_select_columns_sql(numeric_columns_available=numeric_columns_available)}, "
+            f"{_AI_FIT_SCORE_SELECT}"
         )
         cur.execute(
-            f"SELECT {select_columns} FROM raw_listings WHERE id = %s",
+            f"""
+            SELECT {select_columns}
+            FROM raw_listings
+            LEFT JOIN deal_evaluations ON deal_evaluations.listing_id = raw_listings.id
+            WHERE raw_listings.id = %s
+            """,
             (listing_id,),
         )
         row = cur.fetchone()

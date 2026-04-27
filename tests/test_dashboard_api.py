@@ -6,6 +6,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from api.listing_filters import reset_numeric_columns_cache
 from api.routes import dashboard as dashboard_route
 
 
@@ -25,6 +26,7 @@ class FakeDashboardCursor:
         pipeline_exists: bool = False,
         pipeline_columns_ok: bool = True,
         sla_row=None,
+        numeric_columns_available: bool = True,
     ):
         self.snapshot_row = snapshot_row
         self.source_rows = source_rows
@@ -32,6 +34,7 @@ class FakeDashboardCursor:
         self.pipeline_exists = pipeline_exists
         self.pipeline_columns_ok = pipeline_columns_ok
         self.sla_row = sla_row
+        self.numeric_columns_available = numeric_columns_available
 
         self.executions: list[tuple[str, list]] = []
         self._fetchone = None
@@ -54,6 +57,13 @@ class FakeDashboardCursor:
         if "FROM scored" in query and "LEAST(100" in query:
             self._fetchone = None
             self._fetchall = self.priority_rows
+            return
+
+        if "information_schema.columns" in query and "table_name = 'raw_listings'" in query:
+            required_columns = bound_params[0] if bound_params else []
+            count = len(required_columns) if self.numeric_columns_available else max(0, len(required_columns) - 1)
+            self._fetchone = (count,)
+            self._fetchall = []
             return
 
         if "SELECT to_regclass('public.pipeline')" in query:
@@ -113,8 +123,10 @@ def _patch_db(monkeypatch, cursor):
 @pytest.fixture(autouse=True)
 def reset_dashboard_cache():
     dashboard_route.reset_dashboard_overview_cache()
+    reset_numeric_columns_cache()
     yield
     dashboard_route.reset_dashboard_overview_cache()
+    reset_numeric_columns_cache()
 
 
 def _default_snapshot_row():
@@ -294,3 +306,24 @@ def test_dashboard_overview_null_handling_for_empty_data(monkeypatch):
         "parseable_cash_flow_pct": 0.0,
         "parseable_location_pct": 0.0,
     }
+
+
+def test_dashboard_overview_falls_back_without_numeric_columns(monkeypatch):
+    cursor = FakeDashboardCursor(
+        snapshot_row=_default_snapshot_row(),
+        source_rows=_default_source_rows(),
+        priority_rows=_default_priority_rows(),
+        pipeline_exists=False,
+        numeric_columns_available=False,
+    )
+    _patch_db(monkeypatch, cursor)
+
+    client = TestClient(_build_app())
+    response = client.get("/api/dashboard/overview")
+
+    assert response.status_code == 200
+
+    snapshot_query = next(q for q, _ in cursor.executions if "COUNT(*) AS total_listings" in q)
+    assert "AS gross_revenue_num" in snapshot_query
+    assert "AS cash_flow_num" in snapshot_query
+    assert "regexp_replace" in snapshot_query

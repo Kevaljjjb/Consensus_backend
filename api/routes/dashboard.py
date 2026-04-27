@@ -17,6 +17,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
+from api.listing_filters import detect_numeric_columns, numeric_select_columns_sql
 from db.connection import get_db
 
 router = APIRouter(tags=["dashboard"])
@@ -62,6 +63,7 @@ class PriorityQueueItem(BaseModel):
     first_seen_date: Optional[str]
     fit_score: int
     reasons: list[str] = Field(default_factory=list)
+    ai_fit_score: Optional[int] = None
 
 
 class SLAResponse(BaseModel):
@@ -183,9 +185,18 @@ def _cache_set(key: tuple[int, int, tuple[str, ...]], payload: dict[str, Any]) -
         _cache.pop(oldest_key, None)
 
 
-def _fetch_snapshot_funnel_and_quality(cur, *, lookback_days: int, country_scope: list[str]) -> dict[str, Any]:
+def _fetch_snapshot_funnel_and_quality(
+    cur,
+    *,
+    lookback_days: int,
+    country_scope: list[str],
+    numeric_columns_available: bool,
+) -> dict[str, Any]:
+    numeric_select_columns = numeric_select_columns_sql(
+        numeric_columns_available=numeric_columns_available,
+    )
     cur.execute(
-        """
+        f"""
         WITH scoped AS (
             SELECT
                 source,
@@ -193,9 +204,7 @@ def _fetch_snapshot_funnel_and_quality(cur, *, lookback_days: int, country_scope
                 state,
                 industry,
                 first_seen_date,
-                gross_revenue_num,
-                ebitda_num,
-                cash_flow_num
+                {numeric_select_columns}
             FROM raw_listings
             WHERE COALESCE(last_seen_date, first_seen_date) >= NOW() - (%s * INTERVAL '1 day')
         ),
@@ -298,11 +307,20 @@ def _fetch_snapshot_funnel_and_quality(cur, *, lookback_days: int, country_scope
     }
 
 
-def _fetch_source_yield(cur, *, lookback_days: int, country_scope: list[str]) -> list[dict[str, Any]]:
+def _fetch_source_yield(
+    cur,
+    *,
+    lookback_days: int,
+    country_scope: list[str],
+    numeric_columns_available: bool,
+) -> list[dict[str, Any]]:
+    numeric_select_columns = numeric_select_columns_sql(
+        numeric_columns_available=numeric_columns_available,
+    )
     cur.execute(
-        """
+        f"""
         WITH scoped AS (
-            SELECT source, country, gross_revenue_num, ebitda_num, cash_flow_num
+            SELECT source, country, {numeric_select_columns}
             FROM raw_listings
             WHERE COALESCE(last_seen_date, first_seen_date) >= NOW() - (%s * INTERVAL '1 day')
         ),
@@ -355,12 +373,16 @@ def _fetch_priority_queue(
     lookback_days: int,
     country_scope: list[str],
     priority_limit: int,
+    numeric_columns_available: bool,
 ) -> list[dict[str, Any]]:
+    numeric_select_columns = numeric_select_columns_sql(
+        numeric_columns_available=numeric_columns_available,
+    )
     cur.execute(
-        """
+        f"""
         WITH scoped AS (
             SELECT
-                id,
+                raw_listings.id,
                 title,
                 source,
                 state,
@@ -369,10 +391,10 @@ def _fetch_priority_queue(
                 ebitda,
                 cash_flow,
                 first_seen_date,
-                gross_revenue_num,
-                ebitda_num,
-                cash_flow_num
+                {numeric_select_columns},
+                deal_evaluations.fit_score AS ai_fit_score
             FROM raw_listings
+            LEFT JOIN deal_evaluations ON deal_evaluations.listing_id = raw_listings.id
             WHERE COALESCE(last_seen_date, first_seen_date) >= NOW() - (%s * INTERVAL '1 day')
         ),
         flagged AS (
@@ -389,6 +411,7 @@ def _fetch_priority_queue(
                 COALESCE(NULLIF(BTRIM(ebitda), ''), 'N/A') AS ebitda,
                 COALESCE(NULLIF(BTRIM(cash_flow), ''), 'N/A') AS cash_flow,
                 first_seen_date,
+                ai_fit_score,
                 UPPER(BTRIM(COALESCE(country, ''))) = ANY(%s::text[]) AS is_local,
                 cash_flow_num,
                 gross_revenue_num,
@@ -411,6 +434,7 @@ def _fetch_priority_queue(
                 ebitda,
                 cash_flow,
                 first_seen_date,
+                ai_fit_score,
                 CASE WHEN is_local THEN 20 ELSE 0 END AS local_score,
                 CASE
                     WHEN cash_flow_num >= 2000000 THEN 35
@@ -446,8 +470,12 @@ def _fetch_priority_queue(
             ebitda,
             cash_flow,
             first_seen_date,
-            LEAST(100, local_score + cash_flow_score + margin_score + revenue_score + freshness_score) AS fit_score,
-            reasons
+            COALESCE(
+                ai_fit_score,
+                LEAST(100, local_score + cash_flow_score + margin_score + revenue_score + freshness_score)
+            ) AS fit_score,
+            reasons,
+            ai_fit_score
         FROM scored
         ORDER BY fit_score DESC, first_seen_date DESC NULLS LAST, id DESC
         LIMIT %s
@@ -471,6 +499,7 @@ def _fetch_priority_queue(
                 "first_seen_date": _to_iso_datetime(row[8]),
                 "fit_score": _to_int(row[9]),
                 "reasons": reasons,
+                "ai_fit_score": _to_int(row[11]) if row[11] is not None else None,
             }
         )
     return output
@@ -592,22 +621,26 @@ def dashboard_overview(
 
     with get_db() as conn:
         cur = conn.cursor()
+        numeric_columns_available = detect_numeric_columns(cur)
 
         core = _fetch_snapshot_funnel_and_quality(
             cur,
             lookback_days=lookback_days,
             country_scope=normalized_country_scope,
+            numeric_columns_available=numeric_columns_available,
         )
         source_yield = _fetch_source_yield(
             cur,
             lookback_days=lookback_days,
             country_scope=normalized_country_scope,
+            numeric_columns_available=numeric_columns_available,
         )
         priority_queue = _fetch_priority_queue(
             cur,
             lookback_days=lookback_days,
             country_scope=normalized_country_scope,
             priority_limit=priority_limit,
+            numeric_columns_available=numeric_columns_available,
         )
         sla_payload = _fetch_sla(cur, lookback_days=lookback_days)
 

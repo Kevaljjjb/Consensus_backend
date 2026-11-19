@@ -8,6 +8,7 @@ Provides REST API endpoints for:
   - Dashboard statistics
 """
 
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -27,6 +28,12 @@ from api.routes.search import router as search_router
 from api.routes.upload import router as upload_router
 
 
+# Use uvicorn's logger so startup messages appear alongside uvicorn's own
+# output. (Plain print() with emoji crashed startup on Windows consoles,
+# whose default cp1252 encoding can't represent them.)
+logger = logging.getLogger("uvicorn.error")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
@@ -39,12 +46,12 @@ async def lifespan(app: FastAPI):
             cur = conn.cursor()
             cur.execute("SELECT 1")
             cur.close()
-        print("✅ Database connection pool initialised.")
+        logger.info("Database connection pool initialised.")
     except Exception as exc:
-        print(f"⚠️  Database pool init failed: {exc}")
+        logger.error("Database pool init failed: %s", exc)
     yield
     close_pool()
-    print("🛑 Database connection pool closed.")
+    logger.info("Database connection pool closed.")
 
 
 app = FastAPI(

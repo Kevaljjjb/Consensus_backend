@@ -80,10 +80,10 @@ def run_schema(schema_path: str = None) -> None:
             cur = conn.cursor()
             cur.execute(sql)
             conn.commit()
-            print("✅ Schema applied successfully.")
+            print("Schema applied successfully.")
         except Exception as exc:
             conn.rollback()
-            print(f"❌ Schema error: {exc}")
+            print(f"Schema error: {exc}")
             raise
 
 

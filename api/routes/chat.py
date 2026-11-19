@@ -11,6 +11,7 @@ DELETE /api/chat/conversations/{id}   — delete a conversation
 """
 
 import json
+import logging
 import os
 from typing import Any, Optional
 from uuid import UUID
@@ -24,6 +25,8 @@ from pydantic import BaseModel, Field
 router = APIRouter(tags=["chat"])
 
 _OPENAI_BASE_URL = "https://api.openai.com/v1"
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_chat_api_key() -> str:
@@ -643,13 +646,13 @@ async def chat(req: ChatRequest, authorization: Optional[str] = Header(default=N
             store=True,
         )
     except openai.APIStatusError as exc:
-        print(f"⚠️ Chat API error: {exc.status_code} — {exc.message}")
+        logger.warning("Chat API error: %s - %s", exc.status_code, exc.message)
         raise HTTPException(
             status_code=502,
             detail=f"Upstream AI service returned {exc.status_code}",
         ) from exc
     except openai.OpenAIError as exc:
-        print(f"⚠️ Chat API error: {exc}")
+        logger.warning("Chat API error: %s", exc)
         raise HTTPException(
             status_code=502, detail="Failed to reach AI service"
         ) from exc

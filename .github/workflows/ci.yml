@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check modules import
+        run: python -c "import api.main"
+        env:
+          # Some route modules create API clients at import time; tests never
+          # call the real services, so a placeholder is enough.
+          OPENAI_API_KEY: ci-placeholder
+
+      - name: Run tests
+        run: python -m pytest -q
+        env:
+          OPENAI_API_KEY: ci-placeholder

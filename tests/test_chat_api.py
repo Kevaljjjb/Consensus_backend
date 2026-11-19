@@ -392,7 +392,7 @@ def test_chat_uses_gpt54_web_search_config(monkeypatch):
     ]
     assert request_kwargs["store"] is True
     assert request_kwargs["input"][0]["role"] == "system"
-    assert "web search" in request_kwargs["input"][0]["content"].lower()
+    assert request_kwargs["input"][0]["content"] == chat_route.SYSTEM_PROMPT
     assert captured["replace"]["assistant_reply"] == (
         "Use current market benchmarks alongside your diligence."
     )

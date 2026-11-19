@@ -280,3 +280,55 @@ def test_refresh_recomputes_and_replaces_existing_evaluation(monkeypatch):
     assert connection.commits == 1
     assert cursor.evaluation["fit_score"] == 81
     assert any(sql.startswith("DELETE FROM deal_evaluations") for sql, _ in cursor.executions)
+
+
+def _patch_db_tracking_open(monkeypatch, cursor):
+    connection = FakeEvaluationConnection(cursor)
+    state = {"open": 0}
+
+    @contextmanager
+    def fake_get_db():
+        state["open"] += 1
+        try:
+            yield connection
+        finally:
+            state["open"] -= 1
+
+    monkeypatch.setattr(evaluation_route, "get_db", fake_get_db)
+    return connection, state
+
+
+def test_get_evaluation_releases_db_connection_during_llm_call(monkeypatch):
+    cursor = FakeEvaluationCursor()
+    connection, state = _patch_db_tracking_open(monkeypatch, cursor)
+    open_during_llm = []
+
+    def fake_evaluate_deal(listing):
+        open_during_llm.append(state["open"])
+        return _FIRST_EVALUATION
+
+    monkeypatch.setattr(evaluation_route, "evaluate_deal", fake_evaluate_deal)
+    client = TestClient(_build_app())
+
+    response = client.get("/api/listings/1/evaluation")
+    assert response.status_code == 200
+    assert open_during_llm == [0]
+    assert state["open"] == 0
+    assert connection.commits == 1
+
+
+def test_refresh_releases_db_connection_during_llm_call(monkeypatch):
+    cursor = FakeEvaluationCursor(evaluation=_FIRST_EVALUATION)
+    _, state = _patch_db_tracking_open(monkeypatch, cursor)
+    open_during_llm = []
+
+    def fake_evaluate_deal(listing):
+        open_during_llm.append(state["open"])
+        return _REFRESHED_EVALUATION
+
+    monkeypatch.setattr(evaluation_route, "evaluate_deal", fake_evaluate_deal)
+    client = TestClient(_build_app())
+
+    response = client.post("/api/listings/1/evaluation/refresh")
+    assert response.status_code == 200
+    assert open_during_llm == [0]

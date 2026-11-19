@@ -155,35 +155,57 @@ def _persist_evaluation(conn, cur, listing_id: int, evaluation: dict[str, Any], 
         raise
 
 
-@router.get("/listings/{listing_id}/evaluation", response_model=EvaluationResponse)
-def get_listing_evaluation(listing_id: int):
+def _load_listing_for_evaluation(listing_id: int, *, use_cache: bool) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """
+    Read the cached evaluation (optional) and the listing, then release the
+    DB connection. Returns ``(cached_evaluation, listing)``.
+    """
     with get_db() as conn:
         cur = conn.cursor()
         try:
-            cached_evaluation = _get_cached_evaluation(cur, listing_id)
-            if cached_evaluation is not None:
-                return cached_evaluation
-
-            listing = _get_listing(cur, listing_id)
-            if listing is None:
-                raise HTTPException(status_code=404, detail="Listing not found")
-
-            evaluation = evaluate_deal(listing)
-            return _persist_evaluation(conn, cur, listing_id, evaluation, replace_existing=False)
+            if use_cache:
+                cached_evaluation = _get_cached_evaluation(cur, listing_id)
+                if cached_evaluation is not None:
+                    return cached_evaluation, None
+            return None, _get_listing(cur, listing_id)
         finally:
             cur.close()
+            # End the read-only transaction so the connection goes back to
+            # the pool idle rather than "idle in transaction".
+            conn.rollback()
+
+
+def _save_evaluation(listing_id: int, evaluation: dict[str, Any], *, replace_existing: bool) -> dict[str, Any]:
+    with get_db() as conn:
+        cur = conn.cursor()
+        try:
+            return _persist_evaluation(conn, cur, listing_id, evaluation, replace_existing=replace_existing)
+        finally:
+            cur.close()
+
+
+# The LLM call in evaluate_deal() can take tens of seconds. It runs *between*
+# the two DB sections below so it never holds a pooled connection — otherwise
+# a handful of concurrent evaluations would exhaust the pool (maxconn=10) and
+# every other endpoint would start failing with PoolError.
+
+@router.get("/listings/{listing_id}/evaluation", response_model=EvaluationResponse)
+def get_listing_evaluation(listing_id: int):
+    cached_evaluation, listing = _load_listing_for_evaluation(listing_id, use_cache=True)
+    if cached_evaluation is not None:
+        return cached_evaluation
+    if listing is None:
+        raise HTTPException(status_code=404, detail="Listing not found")
+
+    evaluation = evaluate_deal(listing)
+    return _save_evaluation(listing_id, evaluation, replace_existing=False)
 
 
 @router.post("/listings/{listing_id}/evaluation/refresh", response_model=EvaluationResponse)
 def refresh_listing_evaluation(listing_id: int):
-    with get_db() as conn:
-        cur = conn.cursor()
-        try:
-            listing = _get_listing(cur, listing_id)
-            if listing is None:
-                raise HTTPException(status_code=404, detail="Listing not found")
+    _, listing = _load_listing_for_evaluation(listing_id, use_cache=False)
+    if listing is None:
+        raise HTTPException(status_code=404, detail="Listing not found")
 
-            evaluation = evaluate_deal(listing)
-            return _persist_evaluation(conn, cur, listing_id, evaluation, replace_existing=True)
-        finally:
-            cur.close()
+    evaluation = evaluate_deal(listing)
+    return _save_evaluation(listing_id, evaluation, replace_existing=True)

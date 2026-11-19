@@ -126,3 +126,22 @@ def test_evaluate_deal_falls_back_when_model_payload_is_invalid(monkeypatch):
     assert len(result["cons"]) >= 3
     assert sum(result["score_breakdown"].values()) == result["fit_score"]
     assert "Dallas, TX, US" in result["summary"]
+
+
+def test_evaluate_deal_logs_reason_when_falling_back(monkeypatch, caplog):
+    class _FailingCompletions:
+        def create(self, **kwargs):
+            raise RuntimeError("invalid api key")
+
+    class _FailingClient:
+        class chat:
+            completions = _FailingCompletions()
+
+    monkeypatch.setattr(deal_scoring, "_get_client", lambda: _FailingClient())
+
+    with caplog.at_level("WARNING", logger="api.deal_scoring"):
+        result = deal_scoring.evaluate_deal({**_SAMPLE_LISTING, "id": 42})
+
+    assert result["model_used"] == "heuristic-fallback"
+    assert "listing 42" in caplog.text
+    assert "invalid api key" in caplog.text

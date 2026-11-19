@@ -9,6 +9,7 @@ is unavailable or unusable.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from collections.abc import Mapping
@@ -17,6 +18,8 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from openai import OpenAI
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "Qwen/Qwen3.5-27B"
 _DEFAULT_BASE_URL = "https://api.deepinfra.com/v1/openai"
@@ -783,5 +786,13 @@ def evaluate_deal(listing: Mapping[str, Any]) -> dict[str, Any]:
         content = _message_content_to_text(response.choices[0].message.content)
         payload = _extract_json_payload(content)
         return _validate_model_payload(payload)
-    except Exception:
+    except Exception as exc:
+        # Log the reason so a bad API key / model outage is visible instead of
+        # silently producing heuristic scores forever.
+        logger.warning(
+            "LLM evaluation failed for listing %s; using heuristic fallback: %s: %s",
+            listing.get("id"),
+            type(exc).__name__,
+            exc,
+        )
         return _heuristic_evaluation(listing)

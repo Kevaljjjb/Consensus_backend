@@ -4,6 +4,7 @@ Consensus — Semantic Search API route.
 GET /api/search?q=...   — embed the query and find nearest listings via pgvector
 """
 
+import logging
 import os
 import time
 from typing import Any, Optional
@@ -22,6 +23,7 @@ from db.connection import get_db
 from embeddings import get_embedding, rerank_documents
 
 router = APIRouter(tags=["search"])
+logger = logging.getLogger(__name__)
 
 _VECTOR_FETCH_MULTIPLIER = max(1, int(os.environ.get("SEARCH_VECTOR_FETCH_MULTIPLIER", "2")))
 _VECTOR_FETCH_MIN = max(10, int(os.environ.get("SEARCH_VECTOR_FETCH_MIN", "30")))
@@ -285,12 +287,13 @@ def semantic_search(
                 rerank_slice.sort(key=lambda x: x["rerank_score"], reverse=True)
                 results = rerank_slice + results[rerank_count:]
             else:
-                print(
-                    f"⚠️ Rerank skipped: returned scores length ({len(scores)}) "
-                    f"!= documents length ({len(rerank_slice)})."
+                logger.warning(
+                    "Rerank skipped: returned scores length (%d) != documents length (%d).",
+                    len(scores),
+                    len(rerank_slice),
                 )
         except Exception as exc:
-            print(f"⚠️ Reranker failed: {exc}")
+            logger.warning("Reranker failed, using vector order: %s", exc)
 
     # Take top `limit`
     results = results[:limit]

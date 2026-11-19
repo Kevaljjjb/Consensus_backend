@@ -17,9 +17,11 @@ from uuid import UUID
 
 import openai
 from db.connection import get_db
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+
+from api.auth import AuthUser, get_optional_user, resolve_user_id
 
 router = APIRouter(tags=["chat"])
 
@@ -82,7 +84,9 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     model: Optional[str] = None
-    user_id: UUID
+    # Ignored when a verified token is sent (the token's user is used).
+    # Still accepted so existing clients work while AUTH_MODE=off.
+    user_id: Optional[UUID] = None
     conversation_id: Optional[UUID] = None
     title: Optional[str] = None
     edited_message_index: Optional[int] = Field(default=None, ge=0)
@@ -524,7 +528,11 @@ def _fetch_conversation_detail(
 
 
 @router.get("/chat/conversations", response_model=list[ConversationSummary])
-def list_conversations(user_id: UUID):
+def list_conversations(
+    user_id: Optional[UUID] = None,
+    user: Optional[AuthUser] = Depends(get_optional_user),
+):
+    user_id = resolve_user_id(user_id, user)
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -562,17 +570,25 @@ def list_conversations(user_id: UUID):
 
 
 @router.get("/chat/conversations/{conversation_id}", response_model=ConversationDetail)
-def get_conversation(conversation_id: UUID, user_id: UUID):
-    return _fetch_conversation_detail(conversation_id, user_id)
+def get_conversation(
+    conversation_id: UUID,
+    user_id: Optional[UUID] = None,
+    user: Optional[AuthUser] = Depends(get_optional_user),
+):
+    return _fetch_conversation_detail(conversation_id, resolve_user_id(user_id, user))
 
 
 class CreateConversationRequest(BaseModel):
-    user_id: UUID
+    user_id: Optional[UUID] = None
     title: Optional[str] = None
 
 
 @router.post("/chat/conversations", response_model=ConversationDetail)
-def create_conversation(req: CreateConversationRequest):
+def create_conversation(
+    req: CreateConversationRequest,
+    user: Optional[AuthUser] = Depends(get_optional_user),
+):
+    user_id = resolve_user_id(req.user_id, user)
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -581,7 +597,7 @@ def create_conversation(req: CreateConversationRequest):
             VALUES (%s, %s)
             RETURNING id
             """,
-            (str(req.user_id), (req.title or "New chat").strip()[:120]),
+            (str(user_id), (req.title or "New chat").strip()[:120]),
         )
         conversation_row = cur.fetchone()
         if not conversation_row:
@@ -590,11 +606,16 @@ def create_conversation(req: CreateConversationRequest):
         conn.commit()
         cur.close()
 
-    return _fetch_conversation_detail(conversation_id, req.user_id)
+    return _fetch_conversation_detail(conversation_id, user_id)
 
 
 @router.delete("/chat/conversations/{conversation_id}")
-def delete_conversation(conversation_id: UUID, user_id: UUID):
+def delete_conversation(
+    conversation_id: UUID,
+    user_id: Optional[UUID] = None,
+    user: Optional[AuthUser] = Depends(get_optional_user),
+):
+    user_id = resolve_user_id(user_id, user)
     _ensure_conversation_access(conversation_id, user_id)
 
     with get_db() as conn:
@@ -618,8 +639,10 @@ def delete_conversation(conversation_id: UUID, user_id: UUID):
 
 # ── Non-streaming endpoint (kept for backwards compat) ──────────────────────
 @router.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
-    del authorization  # reserved for future auth validation
+async def chat(req: ChatRequest, user: Optional[AuthUser] = Depends(get_optional_user)):
+    # Resolve the user before calling the AI service so unauthenticated
+    # requests never cost anything.
+    user_id = resolve_user_id(req.user_id, user)
 
     if not _API_KEY:
         raise HTTPException(
@@ -662,14 +685,14 @@ async def chat(req: ChatRequest, authorization: Optional[str] = Header(default=N
         raise HTTPException(status_code=502, detail="No response from AI model")
 
     conversation_id = _upsert_conversation(
-        user_id=req.user_id,
+        user_id=user_id,
         messages=req.messages,
         conversation_id=req.conversation_id,
         title=req.title,
     )
     _replace_conversation_messages(
         conversation_id=conversation_id,
-        user_id=req.user_id,
+        user_id=user_id,
         messages=req.messages,
         assistant_reply=output_text,
         edited_message_index=req.edited_message_index,
@@ -687,9 +710,9 @@ async def chat(req: ChatRequest, authorization: Optional[str] = Header(default=N
 # ── Streaming endpoint (SSE) ────────────────────────────────────────────────
 @router.post("/chat/stream")
 async def chat_stream(
-    req: ChatRequest, authorization: Optional[str] = Header(default=None)
+    req: ChatRequest, user: Optional[AuthUser] = Depends(get_optional_user)
 ):
-    del authorization  # reserved for future auth validation
+    user_id = resolve_user_id(req.user_id, user)
 
     if not _API_KEY:
         raise HTTPException(
@@ -700,7 +723,7 @@ async def chat_stream(
         raise HTTPException(status_code=422, detail="messages array must not be empty")
 
     conversation_id = _upsert_conversation(
-        user_id=req.user_id,
+        user_id=user_id,
         messages=req.messages,
         conversation_id=req.conversation_id,
         title=req.title,
@@ -750,7 +773,7 @@ async def chat_stream(
                     if full_text:
                         _replace_conversation_messages(
                             conversation_id=conversation_id,
-                            user_id=req.user_id,
+                            user_id=user_id,
                             messages=req.messages,
                             assistant_reply=full_text,
                             edited_message_index=req.edited_message_index,

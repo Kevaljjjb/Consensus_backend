@@ -303,3 +303,27 @@ Tests cover listings, dashboard, search, chat, deal scoring, and evaluation APIs
 | `EMBEDDING_DIMENSIONS` | ✅ | Embedding vector dimensions |
 | `API_KEY` | ➖ | OpenAI API key (optional, for select features) |
 
+
+## Enabling Authentication
+
+The API verifies the Supabase access token the frontend sends as `Authorization: Bearer <token>`.
+It ships **off by default**, so deploying this code changes nothing until you opt in.
+
+| Variable | Required | Description |
+|---|---|---|
+| `AUTH_MODE` | ➖ | `off` (default): sign-in token optional, existing clients keep working. `on`: chat, upload, evaluation and deal-chat require a valid Supabase token |
+| `SUPABASE_JWT_SECRET` | ➖ | Supabase legacy JWT secret (Project Settings → API → JWT Settings). Needed if your project signs tokens with HS256 |
+| `SUPABASE_URL` | ➖ | `https://<project-ref>.supabase.co`. Needed if your project uses the newer asymmetric JWT signing keys (keys are fetched from JWKS) |
+
+Steps:
+
+1. Deploy the backend with `SUPABASE_JWT_SECRET` and/or `SUPABASE_URL` set (keep `AUTH_MODE=off`).
+2. Deploy the frontend version that sends the token.
+3. Set `AUTH_MODE=on` on the backend and restart.
+
+With `AUTH_MODE=on`:
+- `chat`, `upload`, `evaluation` and `deal-chat` routes return `401` without a valid token.
+- Chat uses the user id **from the token**; a different `user_id` in the request returns `403`, so users can only see their own conversations.
+- Listings, search and dashboard stay public.
+
+The startup log prints which mode is active, and logs an error if `AUTH_MODE=on` is set without a way to verify tokens.

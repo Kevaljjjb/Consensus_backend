@@ -25,12 +25,16 @@ from api.routes.evaluation import router as evaluation_router
 from api.routes.listings import router as listings_router
 from api.routes.search import router as search_router
 from api.routes.upload import router as upload_router
+from api.auth import SIGNED_IN
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
     from db.connection import close_pool, get_db, init_pool
+    from api.auth import log_auth_configuration
+
+    log_auth_configuration()
 
     try:
         init_pool(minconn=2, maxconn=10)
@@ -67,10 +71,10 @@ app.add_middleware(
 app.include_router(listings_router, prefix="/api")
 app.include_router(dashboard_router, prefix="/api")
 app.include_router(search_router, prefix="/api")
-app.include_router(upload_router, prefix="/api")
+app.include_router(upload_router, prefix="/api", dependencies=SIGNED_IN)  # see api/auth.py
 app.include_router(chat_router, prefix="/api")
-app.include_router(evaluation_router, prefix="/api")
-app.include_router(deal_chat_router, prefix="/api")
+app.include_router(evaluation_router, prefix="/api", dependencies=SIGNED_IN)
+app.include_router(deal_chat_router, prefix="/api", dependencies=SIGNED_IN)
 
 
 @app.get("/api/health")

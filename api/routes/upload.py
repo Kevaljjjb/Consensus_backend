@@ -8,8 +8,9 @@ POST /api/upload/csv     — bulk upload from CSV with per-row dupe check
 import csv
 import hashlib
 import io
+import logging
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
@@ -19,6 +20,13 @@ from db.operations import _normalise, _COLUMN_MAP
 from embeddings import get_embedding
 
 router = APIRouter(tags=["upload"])
+logger = logging.getLogger(__name__)
+
+# Upload limits — each CSV row can trigger a paid embedding API call, so cap
+# both the payload size and the number of rows processed per request.
+MAX_CSV_BYTES = 5 * 1024 * 1024  # 5 MB
+MAX_CSV_ROWS = 1000
+_EMBED_MAX_CHARS = 8000
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -33,20 +41,32 @@ def _check_url_duplicate(cur, url: str) -> bool:
     return cur.fetchone() is not None
 
 
-def _check_semantic_duplicate(cur, description: str, threshold: float = 0.15) -> List[dict]:
+def _embed_description(description: str) -> Optional[str]:
     """
-    Level 2: semantic similarity check.
-    Returns listings within the cosine distance threshold.
+    Embed a listing description once and return it as a pgvector literal.
+
+    Returns None for empty descriptions or if the embedding API fails, so an
+    upload never fails just because embeddings are unavailable.
     """
     if not description or description == "N/A":
-        return []
+        return None
 
     try:
-        embedding = get_embedding(description)
-    except Exception:
-        return []
+        vec = get_embedding(description[:_EMBED_MAX_CHARS])
+    except Exception as exc:
+        logger.warning("Embedding failed; storing listing without embedding: %s", exc)
+        return None
 
-    vec_str = "[" + ",".join(str(v) for v in embedding) + "]"
+    return "[" + ",".join(str(v) for v in vec) + "]"
+
+
+def _check_semantic_duplicate(cur, vec_str: Optional[str], threshold: float = 0.15) -> List[dict]:
+    """
+    Level 2: semantic similarity check.
+    Returns listings within the cosine distance threshold of ``vec_str``.
+    """
+    if not vec_str:
+        return []
 
     cur.execute(
         """
@@ -177,8 +197,11 @@ def upload_single(deal: SingleDealRequest):
         # Level 1: exact URL duplicate check
         is_url_dup = _check_url_duplicate(cur, data["url"])
 
+        # Embed once — reused for the semantic check and for storage.
+        embedding_str = _embed_description(data.get("description", ""))
+
         # Level 2: semantic duplicate check
-        similar = _check_semantic_duplicate(cur, data.get("description", ""))
+        similar = _check_semantic_duplicate(cur, embedding_str)
 
         if is_url_dup:
             cur.close()
@@ -188,15 +211,6 @@ def upload_single(deal: SingleDealRequest):
                 "similar_listings": similar,
                 "message": "A listing with this exact URL already exists.",
             }
-
-        # Generate embedding for the new listing
-        embedding_str = None
-        if data.get("description") and data["description"] != "N/A":
-            try:
-                vec = get_embedding(data["description"][:8000])
-                embedding_str = "[" + ",".join(str(v) for v in vec) + "]"
-            except Exception:
-                pass
 
         new_id = _insert_listing(cur, data, embedding=embedding_str)
         conn.commit()
@@ -213,18 +227,30 @@ def upload_single(deal: SingleDealRequest):
 
 
 @router.post("/upload/csv")
-async def upload_csv(file: UploadFile = File(...)):
+def upload_csv(file: UploadFile = File(...)):
     """
     Bulk upload deals from a CSV file.
 
     Expected CSV columns match the scraper output schema (Title, URL, Source, etc.).
     Returns summary: inserted count, skipped (duplicates), and similar listings.
+
+    Each row runs inside its own SAVEPOINT, so one bad row is rolled back on
+    its own without discarding the rows inserted before it.
+
+    Declared as a sync route so FastAPI runs it in a worker thread — the
+    per-row embedding HTTP calls and DB work would otherwise block the event loop.
     """
-    if not file.filename or not file.filename.endswith((".csv", ".CSV")):
+    if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only .csv files are accepted.")
 
-    content = await file.read()
-    text = content.decode("utf-8", errors="replace")
+    content = file.file.read(MAX_CSV_BYTES + 1)
+    if len(content) > MAX_CSV_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"CSV file is too large (max {MAX_CSV_BYTES // (1024 * 1024)} MB).",
+        )
+
+    text = content.decode("utf-8-sig", errors="replace")
     reader = csv.DictReader(io.StringIO(text))
 
     with get_db() as conn:
@@ -234,8 +260,13 @@ async def upload_csv(file: UploadFile = File(...)):
         skipped = 0
         errors = []
         all_similar: List[dict] = []
+        truncated = False
 
         for row_num, csv_row in enumerate(reader, start=2):  # row 1 = header
+            if row_num - 1 > MAX_CSV_ROWS:
+                truncated = True
+                break
+
             # Map CSV columns to DB columns
             data = {}
             for csv_key, db_col in _COLUMN_MAP.items():
@@ -248,44 +279,46 @@ async def upload_csv(file: UploadFile = File(...)):
                 errors.append({"row": row_num, "error": "Missing URL"})
                 continue
 
-            # Level 1: URL dupe check
-            if _check_url_duplicate(cur, url):
-                skipped += 1
-                continue
-
-            # Level 2: semantic dupe check (lighter — just flag, don't block)
-            similar = _check_semantic_duplicate(cur, data.get("description", ""), threshold=0.15)
-            if similar:
-                all_similar.append({
-                    "row": row_num,
-                    "title": data.get("title", "N/A"),
-                    "similar_to": similar,
-                })
-
-            # Generate embedding
-            embedding_str = None
-            desc = data.get("description", "")
-            if desc and desc != "N/A":
-                try:
-                    vec = get_embedding(desc[:8000])
-                    embedding_str = "[" + ",".join(str(v) for v in vec) + "]"
-                except Exception:
-                    pass
-
+            cur.execute("SAVEPOINT csv_row")
             try:
+                # Level 1: URL dupe check
+                if _check_url_duplicate(cur, url):
+                    skipped += 1
+                    cur.execute("RELEASE SAVEPOINT csv_row")
+                    continue
+
+                # Embed once — reused for the semantic check and for storage.
+                embedding_str = _embed_description(data.get("description", ""))
+
+                # Level 2: semantic dupe check (lighter — just flag, don't block)
+                similar = _check_semantic_duplicate(cur, embedding_str, threshold=0.15)
+                if similar:
+                    all_similar.append({
+                        "row": row_num,
+                        "title": data.get("title", "N/A"),
+                        "similar_to": similar,
+                    })
+
                 _insert_listing(cur, data, embedding=embedding_str)
+                cur.execute("RELEASE SAVEPOINT csv_row")
                 inserted += 1
             except Exception as exc:
+                # Undo only this row; earlier rows stay in the transaction.
+                cur.execute("ROLLBACK TO SAVEPOINT csv_row")
                 errors.append({"row": row_num, "error": str(exc)})
-                conn.rollback()
 
         conn.commit()
         cur.close()
+
+    message = f"Processed CSV: {inserted} inserted, {skipped} skipped (duplicates), {len(errors)} errors."
+    if truncated:
+        message += f" Only the first {MAX_CSV_ROWS} rows were processed."
 
     return {
         "inserted": inserted,
         "skipped_duplicates": skipped,
         "errors": errors[:20],  # Limit error output
         "potential_duplicates": all_similar[:20],
-        "message": f"Processed CSV: {inserted} inserted, {skipped} skipped (duplicates), {len(errors)} errors.",
+        "truncated": truncated,
+        "message": message,
     }

@@ -302,4 +302,6 @@ Tests cover listings, dashboard, search, chat, deal scoring, and evaluation APIs
 | `EMBEDDING_MODEL` | ✅ | Embedding model name |
 | `EMBEDDING_DIMENSIONS` | ✅ | Embedding vector dimensions |
 | `API_KEY` | ➖ | OpenAI API key (optional, for select features) |
+| `CORS_ORIGINS` | ➖ | Comma-separated allowed origins, e.g. `https://your-app.vercel.app,http://localhost:3000`. Unset = any origin, without credentials |
+| `CORS_ORIGIN_REGEX` | ➖ | Regex for extra allowed origins, e.g. Vercel previews `https://your-app-.*\.vercel\.app` |
 

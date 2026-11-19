@@ -168,6 +168,7 @@ def _default_priority_rows():
             datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc),
             100,
             ["Local", "Cash Flow Fit", "Margin Fit", "Revenue >= $10M", "New This Week"],
+            None,  # ai_fit_score (no cached LLM evaluation)
         ),
         (
             102,
@@ -181,6 +182,7 @@ def _default_priority_rows():
             datetime(2026, 2, 1, 12, 0, tzinfo=timezone.utc),
             65,
             ["Local", "Cash Flow Near Fit", "Margin Fit"],
+            72,  # ai_fit_score from deal_evaluations
         ),
     ]
 
@@ -277,6 +279,9 @@ def test_dashboard_priority_queue_score_ordering(monkeypatch):
 
     assert queue[0]["fit_score"] >= queue[1]["fit_score"]
     assert queue[0]["reasons"][:3] == ["Local", "Cash Flow Fit", "Margin Fit"]
+    # ai_fit_score is passed through when a cached LLM evaluation exists.
+    assert queue[0]["ai_fit_score"] is None
+    assert queue[1]["ai_fit_score"] == 72
 
     priority_query = next(q for q, _ in cursor.executions if "FROM scored" in q and "LEAST(100" in q)
     assert "ORDER BY fit_score DESC" in priority_query

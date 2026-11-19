@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # Load .env before anything else
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
+from api.cors import get_cors_settings
 from api.routes.chat import router as chat_router
 from api.routes.dashboard import router as dashboard_router
 from api.routes.deal_chat import router as deal_chat_router
@@ -54,14 +55,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — allow all origins for the public API
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS — origins come from CORS_ORIGINS / CORS_ORIGIN_REGEX (see api/cors.py).
+# Unset = allow any origin without credentials (same behaviour as before for
+# the frontend, which does not send cookies to this API).
+app.add_middleware(CORSMiddleware, **get_cors_settings())
 
 # Mount route modules
 app.include_router(listings_router, prefix="/api")
